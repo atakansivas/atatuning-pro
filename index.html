@@ -150,38 +150,154 @@
             const [device, setDevice] = useState(null);
             const [isConnecting, setIsConnecting] = useState(false);
             const [error, setError] = useState("");
+            const [stats, setStats] = useState({ speed: 0, battery: 0, temp: 0 });
+            const [isZeroStart, setIsZeroStart] = useState(false);
+            const [logs, setLogs] = useState([]);
+
+            const addLog = (msg) => {
+                setLogs(prev => [msg, ...prev].slice(0, 5));
+            };
+
+            // Ninebot/Xiaomi UUIDs
+            const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'; 
+            const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+            const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+            // Protocol Helper
+            const calcCRC = (data) => {
+                let sum = 0;
+                for (let i = 2; i < data.length; i++) {
+                    sum += data[i];
+                }
+                const crc = sum ^ 0xFFFF;
+                return [crc & 0xFF, (crc >> 8) & 0xFF];
+            };
+
+            const buildPacket = (addr, cmd, payload) => {
+                const len = payload.length + 2;
+                const packet = [0x55, 0xAA, len, addr, cmd, ...payload];
+                const crc = calcCRC(packet);
+                return new Uint8Array([...packet, ...crc]);
+            };
 
             useEffect(() => {
+                if (!navigator.bluetooth) {
+                    setError("HINWEIS: iOS Safari unterstützt kein Bluetooth. Nutze die 'Bluefy' App!");
+                }
                 const timer = setTimeout(() => {
                     setShowIntro(false);
-                }, 20000); // 20s Cinematic Intro
+                }, 20000); 
                 return () => clearTimeout(timer);
             }, []);
 
+            const handleData = (event) => {
+                const data = new Uint8Array(event.target.value.buffer);
+                const hex = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                // console.log("RX:", hex);
+
+                if (data.length >= 7 && data[0] === 0x55 && data[1] === 0xAA) {
+                    const addr = data[3];
+                    
+                    if (addr === 0x23 || addr === 0x20 || addr === 0x21) {
+                        if (data.length >= 12) {
+                            const speedRaw = data[6] | (data[7] << 8);
+                            const speed = speedRaw / 100;
+                            const battery = data[10]; 
+                            
+                            if (speed >= 0 && speed < 80) {
+                                setStats(prev => ({ 
+                                    ...prev, 
+                                    speed: speed.toFixed(1), 
+                                    battery: Math.min(100, Math.max(0, battery)) 
+                                }));
+                                if (speed > 0) addLog(`Speed: ${speed.toFixed(1)} km/h`);
+                            }
+                        }
+                    }
+                }
+            };
+
             const connectScooter = async () => {
+                if (!navigator.bluetooth) {
+                    setError("iOS Safari unterstützt kein Bluetooth. Bitte nutze die 'Bluefy' App!");
+                    return;
+                }
                 setIsConnecting(true);
                 setError("");
+                addLog("Suche Scooter...");
                 try {
                     const selectedDevice = await navigator.bluetooth.requestDevice({
-                        acceptAllDevices: true,
-                        optionalServices: ['0000180a-0000-1000-8000-00805f9b34fb'] // Generic access or common scooter UUIDs
+                        filters: [
+                            { namePrefix: 'NINEBOT' }, 
+                            { namePrefix: 'MIScooter' }, 
+                            { namePrefix: 'Ata' },
+                            { namePrefix: 'G30' },
+                            { namePrefix: 'F40' },
+                            { namePrefix: 'ES' }
+                        ],
+                        optionalServices: [SERVICE_UUID]
                     });
                     
+                    addLog(`Gefunden: ${selectedDevice.name}`);
+                    const server = await selectedDevice.gatt.connect();
+                    addLog("GATT verbunden");
+                    const service = await server.getPrimaryService(SERVICE_UUID);
+                    const txChar = await service.getCharacteristic(TX_UUID);
+                    
+                    await txChar.startNotifications();
+                    txChar.addEventListener('characteristicvaluechanged', handleData);
+                    
                     setDevice(selectedDevice);
+                    addLog("System bereit!");
+
+                    const pollInterval = setInterval(async () => {
+                        if (selectedDevice.gatt.connected) {
+                            try {
+                                const packet = buildPacket(0x20, 0x01, [0x1A, 0x0A]); 
+                                const rxChar = await service.getCharacteristic(RX_UUID);
+                                await rxChar.writeValue(packet);
+                            } catch (e) {}
+                        } else {
+                            clearInterval(pollInterval);
+                        }
+                    }, 800);
                     
                     selectedDevice.addEventListener('gattserverdisconnected', () => {
                         setDevice(null);
+                        setStats({ speed: 0, battery: 0, temp: 0 });
+                        clearInterval(pollInterval);
+                        addLog("Verbindung verloren");
                     });
 
-                    // Simulation of connection for UI feedback
-                    const server = await selectedDevice.gatt.connect();
-                    console.log("Connected to", selectedDevice.name);
                 } catch (err) {
-                    console.error(err);
+                    addLog(`Error: ${err.message}`);
                     setError(err.message || "Verbindung fehlgeschlagen");
                 } finally {
                     setIsConnecting(false);
                 }
+            };
+
+            const sendCommand = async (payload, addr = 0x20, cmd = 0x03) => {
+                if (!device) return;
+                try {
+                    const server = await device.gatt.connect();
+                    const service = await server.getPrimaryService(SERVICE_UUID);
+                    const rxChar = await service.getCharacteristic(RX_UUID);
+                    
+                    const packet = buildPacket(addr, cmd, payload);
+                    await rxChar.writeValue(packet);
+                    addLog(`Command sent: ${payload[0].toString(16)}`);
+                } catch (err) {
+                    addLog("Command failed");
+                    setError("Befehl fehlgeschlagen: " + err.message);
+                }
+            };
+
+            const toggleZeroStart = () => {
+                const newState = !isZeroStart;
+                setIsZeroStart(newState);
+                addLog(`ZeroStart: ${newState ? 'ON' : 'OFF'}`);
+                sendCommand([0x72, newState ? 0x01 : 0x00]);
             };
 
             const disconnectScooter = () => {
@@ -280,14 +396,14 @@
                                         ) : (
                                             <button 
                                                 onClick={connectScooter}
-                                                disabled={isConnecting}
-                                                className="border-2 border-green text-green px-8 py-4 rounded-xl font-bold hover:bg-green hover:text-black transition-all active:scale-95 w-full text-lg shadow-[0_0_15px_rgba(0,255,0,0.2)] disabled:opacity-50"
+                                                disabled={isConnecting || !navigator.bluetooth}
+                                                className={`border-2 ${!navigator.bluetooth ? 'border-red text-red' : 'border-green text-green'} px-8 py-4 rounded-xl font-bold hover:bg-green hover:text-black transition-all active:scale-95 w-full text-lg shadow-[0_0_15px_rgba(0,255,0,0.2)] disabled:opacity-50`}
                                             >
-                                                {isConnecting ? 'SUCHE...' : 'SCOOTER KOPPELN'}
+                                                {!navigator.bluetooth ? 'BT NICHT UNTERSTÜTZT' : (isConnecting ? 'SUCHE...' : 'SCOOTER KOPPELN')}
                                             </button>
                                         )}
                                         <p className="mt-4 text-[10px] text-gray-500 text-center">
-                                            Bluetooth muss auf deinem iPhone aktiviert sein.
+                                            {!navigator.bluetooth ? 'Nutze die Bluefy App für Bluetooth auf iOS.' : 'Bluetooth muss auf deinem iPhone aktiviert sein.'}
                                         </p>
                                     </div>
 
@@ -298,42 +414,106 @@
                                             <div className="flex justify-between items-center">
                                                 <span className="text-gray-500 text-xs uppercase font-bold">Geschwindigkeit</span>
                                                 <span className={`text-green text-2xl font-bold ${!device && 'opacity-20'}`}>
-                                                    {device ? '0' : '--'} <small className="text-xs">km/h</small>
+                                                    {device ? stats.speed : '--'} <small className="text-xs">km/h</small>
                                                 </span>
                                             </div>
                                             <div className="flex justify-between items-center">
                                                 <span className="text-gray-500 text-xs uppercase font-bold">Batterie</span>
                                                 <span className={`text-red text-2xl font-bold ${!device && 'opacity-20'}`}>
-                                                    {device ? '100' : '--'}%
+                                                    {device ? stats.battery : '--'}%
                                                 </span>
                                             </div>
                                             <div className="w-full bg-gray-900 h-2 rounded-full overflow-hidden">
-                                                <div className={`bg-red h-full transition-all duration-1000 ${device ? 'w-full' : 'w-0'}`}></div>
+                                                <div 
+                                                    className={`bg-red h-full transition-all duration-1000`}
+                                                    style={{ width: `${device ? stats.battery : 0}%` }}
+                                                ></div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Quick Settings */}
+                                    <div className="glass p-6 col-span-1 md:col-span-2 border-green/20">
+                                        <h3 className="text-green font-bold mb-4 uppercase tracking-widest">Quick Config</h3>
+                                        <div className="space-y-4">
+                                            <div className="flex items-center justify-between p-4 border border-white/10 rounded-xl">
+                                                <div>
+                                                    <p className="text-white font-bold uppercase">0-Starter (Zero Start)</p>
+                                                    <p className="text-[10px] text-gray-500 uppercase">Starten ohne Anrollen</p>
+                                                </div>
+                                                <button 
+                                                    onClick={toggleZeroStart}
+                                                    disabled={!device}
+                                                    className={`w-14 h-8 rounded-full p-1 transition-all ${isZeroStart ? 'bg-green' : 'bg-gray-800'} ${!device && 'opacity-20'}`}
+                                                >
+                                                    <div className={`w-6 h-6 bg-white rounded-full transition-all ${isZeroStart ? 'translate-x-6' : 'translate-x-0'}`}></div>
+                                                </button>
+                                            </div>
+
+                                            <div className="p-4 border border-white/10 rounded-xl">
+                                                <div className="flex justify-between mb-2">
+                                                    <p className="text-white font-bold uppercase">Speed Limit</p>
+                                                    <p className="text-green font-bold">{stats.speedLimit || 25} km/h</p>
+                                                </div>
+                                                <input 
+                                                    type="range" 
+                                                    min="5" 
+                                                    max="50" 
+                                                    value={stats.speedLimit || 25}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value);
+                                                        setStats(prev => ({ ...prev, speedLimit: val }));
+                                                    }}
+                                                    onMouseUp={() => sendCommand([0x71, stats.speedLimit || 25])}
+                                                    disabled={!device}
+                                                    className="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-green"
+                                                />
+                                                <div className="flex justify-between text-[8px] text-gray-500 mt-1 uppercase">
+                                                    <span>5 km/h</span>
+                                                    <span>25 km/h</span>
+                                                    <span>50 km/h</span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
 
                                     {/* Features Grid */}
                                     <div className="glass p-6 col-span-1 md:col-span-2 border-green/20">
-                                        <h3 className="text-green font-bold mb-6 uppercase tracking-widest text-center border-b border-green/20 pb-2">Utility Tools</h3>
-                                        <div className="grid grid-cols-2 gap-4">
+                                        <h3 className="text-green font-bold mb-6 uppercase tracking-widest text-center border-b border-green/20 pb-2">Utility Tools (SHU Clone)</h3>
+                                        <div className="grid grid-cols-2 gap-4 mb-6">
                                             {[
-                                                { label: "SHFW INSTALL", color: "green" },
-                                                { label: "REGION 25KM/H", color: "red" },
-                                                { label: "SERIAL ÄNDERN", color: "green" },
-                                                { label: "DASHBOARD LOCK", color: "red" },
-                                                { label: "FIRMWARE RESTORE", color: "green" },
-                                                { label: "OTA TUNING", color: "red" }
+                                                { label: "INSTALL SHFW", color: "green", desc: "Base firmware for tuning", cmd: [0x01], type: "write" },
+                                                { label: "25 KM/H MODE", color: "red", desc: "Set limit to 25", cmd: [0x71, 0x19], type: "config" },
+                                                { label: "30 KM/H MODE", color: "green", desc: "Set limit to 30", cmd: [0x71, 0x1E], type: "config" },
+                                                { label: "MAX SPEED", color: "red", desc: "No limit (SHFW)", cmd: [0x71, 0x32], type: "config" },
+                                                { label: "CRUISE CONTROL", color: "green", desc: "Toggle Cruise", cmd: [0x7B, 0x01], type: "config" },
+                                                { label: "DASHBOARD LOCK", color: "red", desc: "Electronic lock", cmd: [0x70, 0x01], type: "config" },
+                                                { label: "UNLOCK DASH", color: "green", desc: "Remove lock", cmd: [0x70, 0x00], type: "config" },
+                                                { label: "RECOVERY MODE", color: "red", desc: "Unbrick/Flash original", cmd: [0x07], type: "write" }
                                             ].map((tool, index) => (
                                                 <button 
                                                     key={index} 
+                                                    onClick={() => sendCommand(tool.cmd)}
                                                     disabled={!device}
-                                                    className={`border border-${tool.color} text-${tool.color} p-4 rounded-xl text-xs font-bold hover:bg-${tool.color} hover:text-black transition-all flex items-center justify-center text-center leading-tight uppercase disabled:opacity-20 disabled:cursor-not-allowed`}
+                                                    className={`border border-${tool.color} text-${tool.color} p-4 rounded-xl flex flex-col items-center justify-center text-center leading-tight uppercase disabled:opacity-20 disabled:cursor-not-allowed hover:bg-${tool.color} hover:text-black transition-all group active:scale-95`}
                                                 >
-                                                    {tool.label}
+                                                    <span className="text-xs font-bold">{tool.label}</span>
+                                                    <span className="text-[8px] opacity-0 group-hover:opacity-100 transition-opacity mt-1">{tool.desc}</span>
                                                 </button>
                                             ))}
                                         </div>
+
+                                        {/* Debug Logs */}
+                                        <div className="mt-4 p-4 bg-black/50 rounded-xl border border-white/5 font-mono text-[10px] h-32 overflow-hidden">
+                                            <div className="text-gray-500 mb-2 uppercase tracking-tighter border-b border-white/5 pb-1">System Logs</div>
+                                            {logs.map((log, i) => (
+                                                <div key={i} className="text-green/70">
+                                                    <span className="text-gray-600">[{new Date().toLocaleTimeString()}]</span> {log}
+                                                </div>
+                                            ))}
+                                            {logs.length === 0 && <div className="text-gray-700 italic">Warte auf Verbindung...</div>}
+                                        </div>
+                                        
                                         {!device && (
                                             <p className="mt-4 text-center text-red text-[10px] font-bold animate-pulse">
                                                 ERST SCOOTER VERBINDEN FÜR TOOLS
