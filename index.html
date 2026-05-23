@@ -181,8 +181,22 @@
             };
 
             useEffect(() => {
+                const checkBT = async () => {
+                    if (navigator.bluetooth) {
+                        const available = await navigator.bluetooth.getAvailability();
+                        if (!available) {
+                            setError("BLUETOOTH DEAKTIVIERT: Bitte schalte Bluetooth an deinem Gerät ein!");
+                        }
+                    }
+                };
+                checkBT();
+
                 if (!navigator.bluetooth) {
-                    setError("HINWEIS: iOS Safari unterstützt kein Bluetooth. Nutze die 'Bluefy' App!");
+                    if (!window.isSecureContext) {
+                        setError("SICHERHEITS-FEHLER: Bluetooth erfordert HTTPS oder LOCALHOST. Öffne die App nicht direkt als Datei!");
+                    } else {
+                        setError("HINWEIS: Dein Browser unterstützt kein Web-Bluetooth. Nutze Chrome, Edge oder die 'Bluefy' App auf iOS!");
+                    }
                 }
                 const timer = setTimeout(() => {
                     setShowIntro(false);
@@ -224,31 +238,36 @@
                 }
                 setIsConnecting(true);
                 setError("");
-                addLog("Suche Scooter...");
+                addLog("Scanner gestartet...");
                 try {
+                    // Maximal vereinfachter Scan
                     const selectedDevice = await navigator.bluetooth.requestDevice({
-                        filters: [
-                            { namePrefix: 'NINEBOT' }, 
-                            { namePrefix: 'MIScooter' }, 
-                            { namePrefix: 'Ata' },
-                            { namePrefix: 'G30' },
-                            { namePrefix: 'F40' },
-                            { namePrefix: 'ES' }
-                        ],
+                        acceptAllDevices: true,
                         optionalServices: [SERVICE_UUID]
                     });
                     
-                    addLog(`Gefunden: ${selectedDevice.name}`);
+                    addLog(`Versuche Verbindung: ${selectedDevice.name || 'Device'}`);
                     const server = await selectedDevice.gatt.connect();
                     addLog("GATT verbunden");
-                    const service = await server.getPrimaryService(SERVICE_UUID);
+                    
+                    // Versuche den Service zu finden
+                    let service;
+                    try {
+                        service = await server.getPrimaryService(SERVICE_UUID);
+                    } catch (e) {
+                        addLog("Standard-Service nicht gefunden, versuche Alternative...");
+                        // Manchmal haben Custom-Firmwares andere Service-IDs
+                        const services = await server.getPrimaryServices();
+                        service = services[0]; 
+                    }
+
                     const txChar = await service.getCharacteristic(TX_UUID);
                     
                     await txChar.startNotifications();
                     txChar.addEventListener('characteristicvaluechanged', handleData);
                     
                     setDevice(selectedDevice);
-                    addLog("System bereit!");
+                    addLog("VERBUNDEN!");
 
                     const pollInterval = setInterval(async () => {
                         if (selectedDevice.gatt.connected) {
@@ -358,7 +377,10 @@
                             >
                                 {/* Header */}
                                 <header className="w-full flex justify-between items-center py-4 px-6 mb-8">
-                                    <h2 className="text-xl font-bold text-green tracking-tighter">ATATUNING PRO</h2>
+                                    <div className="flex flex-col">
+                                        <h2 className="text-xl font-bold text-green tracking-tighter">ATATUNING PRO</h2>
+                                        <span className="text-[8px] text-gray-600 font-mono uppercase tracking-widest">v1.3 - DEEP SCAN MODE</span>
+                                    </div>
                                     <div className="flex items-center gap-2">
                                         <div className={`w-3 h-3 rounded-full ${device ? 'bg-green' : 'bg-red'} animate-ping`}></div>
                                         <span className={`${device ? 'text-green' : 'text-red'} text-xs font-bold uppercase`}>
