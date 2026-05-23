@@ -147,6 +147,9 @@
 
         const App = () => {
             const [showIntro, setShowIntro] = useState(true);
+            const [device, setDevice] = useState(null);
+            const [isConnecting, setIsConnecting] = useState(false);
+            const [error, setError] = useState("");
 
             useEffect(() => {
                 const timer = setTimeout(() => {
@@ -154,6 +157,39 @@
                 }, 20000); // 20s Cinematic Intro
                 return () => clearTimeout(timer);
             }, []);
+
+            const connectScooter = async () => {
+                setIsConnecting(true);
+                setError("");
+                try {
+                    const selectedDevice = await navigator.bluetooth.requestDevice({
+                        acceptAllDevices: true,
+                        optionalServices: ['0000180a-0000-1000-8000-00805f9b34fb'] // Generic access or common scooter UUIDs
+                    });
+                    
+                    setDevice(selectedDevice);
+                    
+                    selectedDevice.addEventListener('gattserverdisconnected', () => {
+                        setDevice(null);
+                    });
+
+                    // Simulation of connection for UI feedback
+                    const server = await selectedDevice.gatt.connect();
+                    console.log("Connected to", selectedDevice.name);
+                } catch (err) {
+                    console.error(err);
+                    setError(err.message || "Verbindung fehlgeschlagen");
+                } finally {
+                    setIsConnecting(false);
+                }
+            };
+
+            const disconnectScooter = () => {
+                if (device && device.gatt.connected) {
+                    device.gatt.disconnect();
+                }
+                setDevice(null);
+            };
 
             return (
                 <div className="relative h-screen w-screen overflow-hidden flex flex-col items-center justify-center">
@@ -208,22 +244,51 @@
                                 <header className="w-full flex justify-between items-center py-4 px-6 mb-8">
                                     <h2 className="text-xl font-bold text-green tracking-tighter">ATATUNING PRO</h2>
                                     <div className="flex items-center gap-2">
-                                        <div className="w-3 h-3 rounded-full bg-red animate-ping"></div>
-                                        <span className="text-red text-xs font-bold uppercase">Disconnected</span>
+                                        <div className={`w-3 h-3 rounded-full ${device ? 'bg-green' : 'bg-red'} animate-ping`}></div>
+                                        <span className={`${device ? 'text-green' : 'text-red'} text-xs font-bold uppercase`}>
+                                            {device ? 'Connected' : 'Disconnected'}
+                                        </span>
                                     </div>
                                 </header>
+
+                                {/* Error Toast */}
+                                {error && (
+                                    <div className="bg-red/20 border border-red text-red px-4 py-2 rounded-lg text-xs mb-4 animate-bounce">
+                                        FEHLER: {error}
+                                    </div>
+                                )}
 
                                 {/* Main Dashboard */}
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-4xl flex-grow overflow-y-auto pb-32 px-4">
                                     {/* Connection Card */}
                                     <div className="glass p-6 border-green/30">
                                         <h3 className="text-green font-bold mb-4 uppercase flex items-center gap-2">
-                                            <span className="w-2 h-2 bg-green rounded-full animate-pulse"></span>
-                                            Verbindung
+                                            <span className={`w-2 h-2 ${device ? 'bg-green' : 'bg-red'} rounded-full animate-pulse`}></span>
+                                            {device ? 'Verbunden mit:' : 'Verbindung'}
                                         </h3>
-                                        <button className="border-2 border-green text-green px-8 py-4 rounded-xl font-bold hover:bg-green hover:text-black transition-all active:scale-95 w-full text-lg shadow-[0_0_15px_rgba(0,255,0,0.2)]">
-                                            SCOOTER KOPPELN
-                                        </button>
+                                        
+                                        {device ? (
+                                            <div className="space-y-4">
+                                                <p className="text-green text-xl font-black truncate tracking-widest">{device.name || "UNBEKANNTER SCOOTER"}</p>
+                                                <button 
+                                                    onClick={disconnectScooter}
+                                                    className="border-2 border-red text-red px-8 py-3 rounded-xl font-bold hover:bg-red hover:text-black transition-all w-full uppercase"
+                                                >
+                                                    Trennen
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <button 
+                                                onClick={connectScooter}
+                                                disabled={isConnecting}
+                                                className="border-2 border-green text-green px-8 py-4 rounded-xl font-bold hover:bg-green hover:text-black transition-all active:scale-95 w-full text-lg shadow-[0_0_15px_rgba(0,255,0,0.2)] disabled:opacity-50"
+                                            >
+                                                {isConnecting ? 'SUCHE...' : 'SCOOTER KOPPELN'}
+                                            </button>
+                                        )}
+                                        <p className="mt-4 text-[10px] text-gray-500 text-center">
+                                            Bluetooth muss auf deinem iPhone aktiviert sein.
+                                        </p>
                                     </div>
 
                                     {/* Vehicle Info Card */}
@@ -232,14 +297,18 @@
                                         <div className="space-y-4">
                                             <div className="flex justify-between items-center">
                                                 <span className="text-gray-500 text-xs uppercase font-bold">Geschwindigkeit</span>
-                                                <span className="text-green text-2xl font-bold">0 <small className="text-xs">km/h</small></span>
+                                                <span className={`text-green text-2xl font-bold ${!device && 'opacity-20'}`}>
+                                                    {device ? '0' : '--'} <small className="text-xs">km/h</small>
+                                                </span>
                                             </div>
                                             <div className="flex justify-between items-center">
                                                 <span className="text-gray-500 text-xs uppercase font-bold">Batterie</span>
-                                                <span className="text-red text-2xl font-bold">--%</span>
+                                                <span className={`text-red text-2xl font-bold ${!device && 'opacity-20'}`}>
+                                                    {device ? '100' : '--'}%
+                                                </span>
                                             </div>
                                             <div className="w-full bg-gray-900 h-2 rounded-full overflow-hidden">
-                                                <div className="bg-red h-full w-0 transition-all duration-1000"></div>
+                                                <div className={`bg-red h-full transition-all duration-1000 ${device ? 'w-full' : 'w-0'}`}></div>
                                             </div>
                                         </div>
                                     </div>
@@ -256,11 +325,20 @@
                                                 { label: "FIRMWARE RESTORE", color: "green" },
                                                 { label: "OTA TUNING", color: "red" }
                                             ].map((tool, index) => (
-                                                <button key={index} className={`border border-${tool.color} text-${tool.color} p-4 rounded-xl text-xs font-bold hover:bg-${tool.color} hover:text-black transition-all flex items-center justify-center text-center leading-tight uppercase`}>
+                                                <button 
+                                                    key={index} 
+                                                    disabled={!device}
+                                                    className={`border border-${tool.color} text-${tool.color} p-4 rounded-xl text-xs font-bold hover:bg-${tool.color} hover:text-black transition-all flex items-center justify-center text-center leading-tight uppercase disabled:opacity-20 disabled:cursor-not-allowed`}
+                                                >
                                                     {tool.label}
                                                 </button>
                                             ))}
                                         </div>
+                                        {!device && (
+                                            <p className="mt-4 text-center text-red text-[10px] font-bold animate-pulse">
+                                                ERST SCOOTER VERBINDEN FÜR TOOLS
+                                            </p>
+                                        )}
                                     </div>
                                 </div>
 
